@@ -1,0 +1,1 @@
+# confidential-debug-secret-consumer
