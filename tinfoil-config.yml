@@ -27,5 +27,5 @@ shim:
   paths:
     - /health
     - /receive
-    - /received
+    - /inventory
     - /trigger

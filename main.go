@@ -20,6 +20,17 @@ type receivedItem struct {
 	Metadata json.RawMessage `json:"metadata"`
 }
 
+type inventoryEntry struct {
+	ID   string `json:"id"`
+	Size int    `json:"size"`
+}
+
+type inventory struct {
+	Count int              `json:"count"`
+	Total int              `json:"total_bytes"`
+	Items []inventoryEntry `json:"items"`
+}
+
 type Server struct {
 	mu         sync.RWMutex
 	secrets    []receivedItem
@@ -60,8 +71,9 @@ func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]int{"received": len(items)})
 }
 
-// handleReceived returns all secrets received since startup.
-func (s *Server) handleReceived(w http.ResponseWriter, r *http.Request) {
+// handleInventory returns metrics about received secrets without exposing
+// the secret data itself.
+func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -70,9 +82,16 @@ func (s *Server) handleReceived(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	inv := inventory{Items: make([]inventoryEntry, len(s.secrets))}
+	for i, item := range s.secrets {
+		inv.Items[i] = inventoryEntry{ID: item.ID, Size: len(item.Data)}
+		inv.Total += len(item.Data)
+	}
+	inv.Count = len(s.secrets)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(s.secrets)
+	_ = json.NewEncoder(w).Encode(inv)
 }
 
 // handleTrigger tells the storage enclave to push secrets to this consumer.
@@ -110,7 +129,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/receive", srv.handleReceive)
-	mux.HandleFunc("/received", srv.handleReceived)
+	mux.HandleFunc("/inventory", srv.handleInventory)
 	mux.HandleFunc("/trigger", srv.handleTrigger)
 
 	httpSrv := &http.Server{
