@@ -14,21 +14,16 @@ import (
 	"time"
 )
 
-// gitSHA is injected at build time via -ldflags="-X main.gitSHA=...".
-var gitSHA = "unknown"
-
-// receivedItem is one secret pushed by the storage enclave.
 type receivedItem struct {
 	ID       string          `json:"id"`
 	Data     string          `json:"data"`
 	Metadata json.RawMessage `json:"metadata"`
 }
 
-// Server holds the in-memory state for the consumer app.
 type Server struct {
 	mu         sync.RWMutex
 	secrets    []receivedItem
-	storageURL string // e.g. "https://secret-storage.tinfoil.containers.tinfoil.dev"
+	storageURL string
 }
 
 // handleHealth returns a simple liveness response.
@@ -42,9 +37,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleReceive accepts secrets pushed by the storage enclave over attested
-// TLS. The storage enclave verifies the consumer's attestation before pushing,
-// so no client-side verification is needed here.
+// handleReceive accepts secrets pushed by the storage enclave over attested TLS.
 func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -83,9 +76,6 @@ func (s *Server) handleReceived(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTrigger tells the storage enclave to push secrets to this consumer.
-// The storage enclave will verify the consumer's attestation via SecureClient
-// before pushing. This endpoint is unauthenticated — it just triggers the
-// push; the security is in the storage enclave's attested push.
 func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -111,11 +101,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	addr := envDefault("LISTEN_ADDR", ":8089")
 	storageURL := os.Getenv("STORAGE_URL")
-	if env := os.Getenv("GIT_SHA"); env != "" {
-		gitSHA = env
-	}
 
 	srv := &Server{
 		storageURL: storageURL,
@@ -128,7 +114,7 @@ func main() {
 	mux.HandleFunc("/trigger", srv.handleTrigger)
 
 	httpSrv := &http.Server{
-		Addr:              addr,
+		Addr:              ":8089",
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -138,7 +124,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("secret-consumer listening on %s (git=%s)", addr, gitSHA)
+		log.Printf("secret-consumer listening on :8089")
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}
@@ -154,11 +140,4 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
-}
-
-func envDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
