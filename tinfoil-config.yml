@@ -15,7 +15,6 @@ containers:
     networks: [web]
     env:
       - STORAGE_URL: "https://secret-storage.tinfoil.containers.tinfoil.dev"
-      - AUTO_PULL: "true"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
       interval: 30s
@@ -27,5 +26,6 @@ shim:
   upstream-port: 8089
   paths:
     - /health
-    - /pull-now
+    - /receive
     - /received
+    - /trigger
