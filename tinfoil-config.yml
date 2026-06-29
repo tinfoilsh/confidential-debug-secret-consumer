@@ -1,0 +1,30 @@
+cvm-version: 0.10.7
+cpus: 4
+memory: 4096
+
+networks:
+  web:
+    egress:
+      allowlist:
+        - secret-storage.tinfoil.containers.tinfoil.dev
+
+containers:
+  - name: "secret-consumer"
+    image: "ghcr.io/tinfoilsh/confidential-debug-secret-consumer@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    restart: always
+    networks: [web]
+    env:
+      - STORAGE_URL: "https://secret-storage.tinfoil.containers.tinfoil.dev"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5m
+
+shim:
+  listen-port: 443
+  upstream-port: 8089
+  paths:
+    - /health
+    - /receive
+    - /inventory
