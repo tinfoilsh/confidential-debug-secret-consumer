@@ -28,4 +28,3 @@ shim:
     - /health
     - /receive
     - /inventory
-    - /trigger

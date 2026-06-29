@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -94,43 +93,42 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(inv)
 }
 
-// handleTrigger tells the storage enclave to push secrets to this consumer.
-func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+// syncLoop periodically triggers a push from the storage enclave every 60s.
+func (s *Server) syncLoop(ctx context.Context) {
 	if s.storageURL == "" {
-		http.Error(w, "STORAGE_URL not configured", http.StatusInternalServerError)
+		log.Printf("STORAGE_URL not set, skipping sync loop")
 		return
 	}
-
-	resp, err := http.Post(s.storageURL+"/push", "application/json", bytes.NewReader([]byte("{}")))
-	if err != nil {
-		http.Error(w, "trigger failed: "+err.Error(), http.StatusBadGateway)
-		return
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			resp, err := http.Post(s.storageURL+"/push", "application/json", bytes.NewReader([]byte("{}")))
+			if err != nil {
+				log.Printf("sync: push failed: %v", err)
+				continue
+			}
+			resp.Body.Close()
+			log.Printf("sync: push returned %d", resp.StatusCode)
+		}
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
 }
 
 func main() {
-	storageURL := os.Getenv("STORAGE_URL")
-
 	srv := &Server{
-		storageURL: storageURL,
+		storageURL: os.Getenv("STORAGE_URL"),
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.syncLoop(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/receive", srv.handleReceive)
 	mux.HandleFunc("/inventory", srv.handleInventory)
-	mux.HandleFunc("/trigger", srv.handleTrigger)
 
 	httpSrv := &http.Server{
 		Addr:              ":8089",
@@ -154,6 +152,7 @@ func main() {
 	<-stop
 	log.Printf("shutdown signal received")
 
+	cancel()
 	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer sCancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
