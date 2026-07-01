@@ -78,7 +78,7 @@ func (s *pgInventory) AllItems(ctx context.Context) ([]item, error) {
 		if err := rows.Scan(&it.ID, &it.UserID, &meta, &it.CreatedAt); err != nil {
 			return nil, err
 		}
-		if meta != nil {
+		if meta != nil && *meta != "" {
 			it.Metadata = json.RawMessage(*meta)
 		}
 		items = append(items, it)
