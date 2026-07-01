@@ -8,7 +8,7 @@ networks:
 
 containers:
   - name: "secret-consumer"
-    image: "ghcr.io/tinfoilsh/confidential-debug-secret-consumer@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    image: "ghcr.io/tinfoilsh/confidential-debug-secret-consumer@sha256:1be102919288e0b0b850890db1b906be6b24a96c53146c2b3fc7a46bbbd1c95d" # v0.2.3
     restart: always
     networks: [web]
     env:
