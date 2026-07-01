@@ -4,11 +4,11 @@ memory: 4096
 
 networks:
   egress:
-    egress:
-      allowlist:
-        - secret-storage.tinfoil.containers.tinfoil.dev
-        - db-demo-storage.tinfoil.dev
-        - s3.us-east-2.amazonaws.com
+    egress: allowlist
+    allow:
+      - secret-storage.tinfoil.containers.tinfoil.dev
+      - db-demo-storage.tinfoil.dev
+      - s3.us-east-2.amazonaws.com
 
 containers:
   - name: "secret-consumer"
