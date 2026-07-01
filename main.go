@@ -19,7 +19,7 @@ type keyBundle struct {
 
 type Server struct {
 	buckets    *Client
-	inventory  InventoryDB        // public inventory DB (shared Postgres, read-only); private data is in S3 via buckets
+	inventory  InventoryDB // public inventory DB (shared Postgres, read-only); private data is in S3 via buckets
 	mu         sync.RWMutex
 	keys       map[string][]byte // itemID -> encryption key (ephemeral, in-memory only)
 	storageURL string
@@ -30,12 +30,14 @@ func main() {
 	storageURL := os.Getenv("STORAGE_URL")
 	domain := os.Getenv("DOMAIN")
 
+	// Open the inventory DB (Postgres)
 	inventory, err := NewInventoryDBFromEnv(context.Background())
 	if err != nil {
 		log.Fatalf("opening db: %v", err)
 	}
 	defer inventory.Close()
 
+	// Start the secret consumer server
 	srv := &Server{
 		buckets:    NewBucketsClient(os.Getenv("BUCKETS_URL"), "secret-storage"),
 		inventory:  inventory,
@@ -88,6 +90,7 @@ func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{"received": stored})
 }
 
+// /inventory returns the public inventory of all items stored in the shared Postgres database.
 func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	items, err := s.inventory.AllItems(r.Context())
 	if err != nil {
@@ -107,6 +110,7 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries})
 }
 
+// /consume fetches the encrypted data from the Tinfoil Bucket and processes it in-memory for MPC consumption.
 func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	items, err := s.inventory.AllItems(r.Context())
 	if err != nil {
@@ -150,6 +154,7 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// /syncLoop periodically pings the storage enclave to get the user's encryption keys over attested TLS.
 func (s *Server) syncLoop(ctx context.Context) {
 	if s.storageURL == "" || s.domain == "" {
 		log.Printf("STORAGE_URL or DOMAIN not set, skipping sync loop")
