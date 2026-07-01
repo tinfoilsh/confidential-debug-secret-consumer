@@ -21,7 +21,7 @@ type keyBundle struct {
 
 type Server struct {
 	buckets    *Client
-	store      Store
+	meta       Metadata           // public metadata (shared Postgres, read-only); private data is in S3 via buckets
 	mu         sync.RWMutex
 	keys       map[string][]byte // itemID -> encryption key (ephemeral, in-memory only)
 	storageURL string
@@ -39,15 +39,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store, err := NewStoreFromEnv(ctx)
+	meta, err := NewMetadataFromEnv(ctx)
 	if err != nil {
 		log.Fatalf("opening db: %v", err)
 	}
-	defer store.Close()
+	defer meta.Close()
 
 	srv := &Server{
 		buckets:    NewBucketsClient(bucketsURL, "secret-storage"),
-		store:      store,
+		meta:       meta,
 		keys:       make(map[string][]byte),
 		storageURL: storageURL,
 		domain:     domain,
@@ -145,7 +145,7 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := s.store.AllItems(r.Context())
+	items, err := s.meta.AllItems(r.Context())
 	if err != nil {
 		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -167,7 +167,7 @@ func (s *Server) handleTrain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := s.store.AllItems(r.Context())
+	items, err := s.meta.AllItems(r.Context())
 	if err != nil {
 		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
