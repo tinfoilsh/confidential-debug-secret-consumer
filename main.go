@@ -13,15 +13,15 @@ import (
 )
 
 type keyBundle struct {
-	ID  string `json:"id"`
-	Key string `json:"key"`
+	UserID string `json:"user_id"`
+	Key    string `json:"key"`
 }
 
 type Server struct {
 	buckets    *Client
 	inventory  InventoryDB // public inventory DB (shared Postgres, read-only); private data is in S3 via buckets
 	mu         sync.RWMutex
-	keys       map[string][]byte // itemID -> encryption key (ephemeral, in-memory only)
+	keys       map[string][]byte // userID -> encryption key (ephemeral, in-memory only)
 	storageURL string
 	domain     string
 }
@@ -65,7 +65,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 // /receive accepts key bundles from the storage enclave over attested TLS.
-// Keys are stored in memory only - item metadata is already in the shared inventory DB.
+// Keys are stored in memory only (userID -> key). The consumer joins them with
+// the inventory DB (id -> user_id) at consume time.
 func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	var bundles []keyBundle
 	if err := json.NewDecoder(r.Body).Decode(&bundles); err != nil {
@@ -77,11 +78,11 @@ func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	for _, b := range bundles {
 		encKey, err := base64.StdEncoding.DecodeString(b.Key)
 		if err != nil {
-			log.Printf("/receive: invalid key for %s: %v", b.ID, err)
+			log.Printf("/receive: invalid key for %s: %v", b.UserID, err)
 			continue
 		}
 		s.mu.Lock()
-		s.keys[b.ID] = encKey
+		s.keys[b.UserID] = encKey
 		s.mu.Unlock()
 		stored++
 	}
@@ -129,10 +130,10 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 
 	for _, it := range items {
 		s.mu.RLock()
-		encKey, ok := s.keys[it.ID]
+		encKey, ok := s.keys[it.UserID]
 		s.mu.RUnlock()
 		if !ok {
-			log.Printf("/consume: no key for %s, skipping", it.ID)
+			log.Printf("/consume: no key for user %s, skipping item %s", it.UserID, it.ID)
 			continue
 		}
 
