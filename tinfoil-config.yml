@@ -3,18 +3,14 @@ cpus: 4
 memory: 4096
 
 networks:
-  egress:
-    egress: allowlist
-    allow:
-      - secret-storage.tinfoil.containers.tinfoil.dev
-      - db-demo-storage.tinfoil.dev
-      - s3.us-east-2.amazonaws.com
+  web:
+    egress: open
 
 containers:
   - name: "secret-consumer"
     image: "ghcr.io/tinfoilsh/confidential-debug-secret-consumer@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     restart: always
-    networks: [egress]
+    networks: [web]
     env:
       - BUCKETS_URL: "http://buckets:9000"
       - STORAGE_URL: "https://secret-storage.tinfoil.containers.tinfoil.dev"
@@ -33,7 +29,7 @@ containers:
   - name: "buckets"
     image: "ghcr.io/tinfoilsh/tinfoil-buckets-sidecar@sha256:a0f5fd6a3dbdb0a95799ae687e127bb544b7998221458ae1face3fc8c3f43f30"
     restart: always
-    networks: [egress]
+    networks: [web]
     env:
       - PORT: "9000"
       - BUCKET: "demo-secret-storage"
