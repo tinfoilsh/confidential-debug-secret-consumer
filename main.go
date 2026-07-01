@@ -61,7 +61,9 @@ func main() {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		log.Printf("/health: encoding response: %v", err)
+	}
 }
 
 // /receive accepts key bundles from the storage enclave over attested TLS.
@@ -108,7 +110,9 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		entries[i].Meta = it.Metadata
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries})
+	if err := json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries}); err != nil {
+		log.Printf("/inventory: encoding response: %v", err)
+	}
 }
 
 // /consume fetches the encrypted data from the Tinfoil Bucket and processes it in-memory for MPC consumption.
