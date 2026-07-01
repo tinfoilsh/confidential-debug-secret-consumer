@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,16 +35,10 @@ func (c *Client) Get(ctx context.Context, key string, encKey []byte) ([]byte, er
 		return nil, fmt.Errorf("buckets get: %w", err)
 	}
 	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return io.ReadAll(resp.Body)
-	case http.StatusNotFound:
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("buckets: object %s not found", key)
-	default:
-		code, msg := s3Error(resp.Body)
-		return nil, fmt.Errorf("buckets: get status %d: %s", resp.StatusCode, joinCodeMessage(code, msg))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("buckets: get status %d", resp.StatusCode)
 	}
+	return io.ReadAll(resp.Body)
 }
 
 func (c *Client) objectURL(key string) string {
@@ -55,29 +48,4 @@ func (c *Client) objectURL(key string) string {
 func (c *Client) setHeaders(req *http.Request, encKey []byte) {
 	req.Header.Set("X-Tinfoil-Tenant-Id", c.tenant)
 	req.Header.Set("X-Tinfoil-Encryption-Key", base64.StdEncoding.EncodeToString(encKey))
-}
-
-type s3ErrorBody struct {
-	Code    string `xml:"Code"`
-	Message string `xml:"Message"`
-}
-
-func s3Error(r io.Reader) (code, message string) {
-	raw, _ := io.ReadAll(io.LimitReader(r, 8192))
-	var e s3ErrorBody
-	if err := xml.Unmarshal(raw, &e); err == nil && e.Code != "" {
-		return e.Code, e.Message
-	}
-	return "", strings.TrimSpace(string(raw))
-}
-
-func joinCodeMessage(code, message string) string {
-	switch {
-	case code != "" && message != "":
-		return code + ": " + message
-	case code != "":
-		return code
-	default:
-		return message
-	}
 }

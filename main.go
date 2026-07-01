@@ -27,73 +27,47 @@ type Server struct {
 }
 
 func main() {
-	bucketsURL := os.Getenv("BUCKETS_URL")
-	if bucketsURL == "" {
-		log.Fatal("BUCKETS_URL is required")
-	}
 	storageURL := os.Getenv("STORAGE_URL")
 	domain := os.Getenv("DOMAIN")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	inventory, err := NewInventoryDBFromEnv(ctx)
+	inventory, err := NewInventoryDBFromEnv(context.Background())
 	if err != nil {
 		log.Fatalf("opening db: %v", err)
 	}
 	defer inventory.Close()
 
 	srv := &Server{
-		buckets:    NewBucketsClient(bucketsURL, "secret-storage"),
+		buckets:    NewBucketsClient(os.Getenv("BUCKETS_URL"), "secret-storage"),
 		inventory:  inventory,
 		keys:       make(map[string][]byte),
 		storageURL: storageURL,
 		domain:     domain,
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go srv.syncLoop(ctx)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", srv.handleHealth)
-	mux.HandleFunc("/receive", srv.handleReceive)
-	mux.HandleFunc("/inventory", srv.handleInventory)
-	mux.HandleFunc("/consume", srv.handleConsume)
-
-	httpSrv := &http.Server{
-		Addr:              ":8089",
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      300 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 16,
-	}
+	mux.HandleFunc("GET /health", srv.handleHealth)
+	mux.HandleFunc("POST /receive", srv.handleReceive)
+	mux.HandleFunc("GET /inventory", srv.handleInventory)
+	mux.HandleFunc("POST /consume", srv.handleConsume)
 
 	log.Printf("secret-consumer listening on :8089")
-	log.Fatal(httpSrv.ListenAndServe())
+	log.Fatal(http.ListenAndServe(":8089", mux))
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // /receive accepts key bundles from the storage enclave over attested TLS.
 // Keys are stored in memory only - item metadata is already in the shared inventory DB.
 func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var bundles []keyBundle
 	if err := json.NewDecoder(r.Body).Decode(&bundles); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -111,47 +85,32 @@ func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("/receive: stored %d/%d key bundles", stored, len(bundles))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]int{"received": stored})
-}
-
-type inventoryEntry struct {
-	ID   string          `json:"id"`
-	Meta json.RawMessage `json:"metadata"`
+	json.NewEncoder(w).Encode(map[string]int{"received": stored})
 }
 
 func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	items, err := s.inventory.AllItems(r.Context())
 	if err != nil {
-		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	entries := make([]inventoryEntry, len(items))
+	entries := make([]struct {
+		ID   string          `json:"id"`
+		Meta json.RawMessage `json:"metadata"`
+	}, len(items))
 	for i, it := range items {
-		entries[i] = inventoryEntry{ID: it.ID, Meta: it.Metadata}
+		entries[i].ID = it.ID
+		entries[i].Meta = it.Metadata
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries})
+	json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries})
 }
 
 func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	items, err := s.inventory.AllItems(r.Context())
 	if err != nil {
-		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -183,9 +142,7 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("/consume: processed %d datasets (%d bytes total)", len(datasets), totalBytes)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	json.NewEncoder(w).Encode(map[string]any{
 		"status":      "consumed",
 		"datasets":    len(datasets),
 		"total_bytes": totalBytes,
@@ -194,19 +151,12 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) syncLoop(ctx context.Context) {
-	if s.storageURL == "" {
-		log.Printf("STORAGE_URL not set, skipping sync loop")
-		return
-	}
-	if s.domain == "" {
-		log.Printf("DOMAIN not set, skipping sync loop")
+	if s.storageURL == "" || s.domain == "" {
+		log.Printf("STORAGE_URL or DOMAIN not set, skipping sync loop")
 		return
 	}
 
-	pushBody, _ := json.Marshal(map[string]string{
-		"host": s.domain,
-	})
-
+	pushBody, _ := json.Marshal(map[string]string{"host": s.domain})
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
