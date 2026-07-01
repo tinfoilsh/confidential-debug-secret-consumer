@@ -3,102 +3,166 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 )
 
-type receivedItem struct {
-	ID       string          `json:"id"`
-	Data     string          `json:"data"`
-	Metadata json.RawMessage `json:"metadata"`
-}
-
-type inventoryEntry struct {
-	ID   string `json:"id"`
-	Size int    `json:"size"`
-}
-
-type inventory struct {
-	Count int              `json:"count"`
-	Total int              `json:"total_bytes"`
-	Items []inventoryEntry `json:"items"`
+type keyBundle struct {
+	UserID string `json:"user_id"`
+	Key    string `json:"key"`
 }
 
 type Server struct {
+	buckets    *Client
+	inventory  InventoryDB // public inventory DB (shared Postgres, read-only); private data is in S3 via buckets
 	mu         sync.RWMutex
-	secrets    []receivedItem
+	keys       map[string][]byte // userID -> encryption key (ephemeral, in-memory only)
 	storageURL string
+	domain     string
 }
 
-// handleHealth returns a simple liveness response.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+func main() {
+	storageURL := os.Getenv("STORAGE_URL")
+	domain := os.Getenv("DOMAIN")
+
+	// Open the inventory DB (Postgres)
+	inventory, err := NewInventoryDBFromEnv(context.Background())
+	if err != nil {
+		log.Fatalf("opening db: %v", err)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	defer inventory.Close()
+
+	// Start the secret consumer server
+	srv := &Server{
+		buckets:    NewBucketsClient(os.Getenv("BUCKETS_URL"), "secret-storage"),
+		inventory:  inventory,
+		keys:       make(map[string][]byte),
+		storageURL: storageURL,
+		domain:     domain,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.syncLoop(ctx)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", srv.handleHealth)
+	mux.HandleFunc("POST /receive", srv.handleReceive)
+	mux.HandleFunc("GET /inventory", srv.handleInventory)
+	mux.HandleFunc("POST /consume", srv.handleConsume)
+
+	log.Printf("secret-consumer listening on :8089")
+	log.Fatal(http.ListenAndServe(":8089", mux))
 }
 
-// handleReceive accepts secrets pushed by the storage enclave over attested TLS.
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// /receive accepts key bundles from the storage enclave over attested TLS.
+// Keys are stored in memory only (userID -> key). The consumer joins them with
+// the inventory DB (id -> user_id) at consume time.
 func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	var bundles []keyBundle
+	if err := json.NewDecoder(r.Body).Decode(&bundles); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	var items []receivedItem
-	if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
+	stored := 0
+	for _, b := range bundles {
+		encKey, err := base64.StdEncoding.DecodeString(b.Key)
+		if err != nil {
+			log.Printf("/receive: invalid key for %s: %v", b.UserID, err)
+			continue
+		}
+		s.mu.Lock()
+		s.keys[b.UserID] = encKey
+		s.mu.Unlock()
+		stored++
 	}
 
-	s.mu.Lock()
-	s.secrets = append(s.secrets, items...)
-	s.mu.Unlock()
-
-	log.Printf("/receive: accepted %d secret(s)", len(items))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]int{"received": len(items)})
+	log.Printf("/receive: stored %d/%d key bundles", stored, len(bundles))
+	json.NewEncoder(w).Encode(map[string]int{"received": stored})
 }
 
-// handleInventory returns metrics about received secrets without exposing
-// the secret data itself.
+// /inventory returns the public inventory of all items stored in the shared Postgres database.
 func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	items, err := s.inventory.AllItems(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	inv := inventory{Items: make([]inventoryEntry, len(s.secrets))}
-	for i, item := range s.secrets {
-		inv.Items[i] = inventoryEntry{ID: item.ID, Size: len(item.Data)}
-		inv.Total += len(item.Data)
+	entries := make([]struct {
+		ID   string          `json:"id"`
+		Meta json.RawMessage `json:"metadata"`
+	}, len(items))
+	for i, it := range items {
+		entries[i].ID = it.ID
+		entries[i].Meta = it.Metadata
 	}
-	inv.Count = len(s.secrets)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(inv)
+	json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries})
 }
 
-// syncLoop periodically triggers a push from the storage enclave every 60s.
-func (s *Server) syncLoop(ctx context.Context) {
-	if s.storageURL == "" {
-		log.Printf("STORAGE_URL not set, skipping sync loop")
+// /consume fetches the encrypted data from the Tinfoil Bucket and processes it in-memory for MPC consumption.
+func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
+	items, err := s.inventory.AllItems(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	ctx := r.Context()
+	type dataset struct {
+		ID   string          `json:"id"`
+		Size int             `json:"size"`
+		Meta json.RawMessage `json:"metadata"`
+	}
+	datasets := make([]dataset, 0, len(items))
+	totalBytes := 0
+
+	for _, it := range items {
+		s.mu.RLock()
+		encKey, ok := s.keys[it.UserID]
+		s.mu.RUnlock()
+		if !ok {
+			log.Printf("/consume: no key for user %s, skipping item %s", it.UserID, it.ID)
+			continue
+		}
+
+		plaintext, err := s.buckets.Get(ctx, it.ID, encKey)
+		if err != nil {
+			log.Printf("/consume: retrieving %s: %v", it.ID, err)
+			continue
+		}
+		totalBytes += len(plaintext)
+		datasets = append(datasets, dataset{ID: it.ID, Size: len(plaintext), Meta: it.Metadata})
+	}
+
+	log.Printf("/consume: processed %d datasets (%d bytes total)", len(datasets), totalBytes)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":      "consumed",
+		"datasets":    len(datasets),
+		"total_bytes": totalBytes,
+		"items":       datasets,
+	})
+}
+
+// /syncLoop periodically pings the storage enclave to get the user's encryption keys over attested TLS.
+func (s *Server) syncLoop(ctx context.Context) {
+	if s.storageURL == "" || s.domain == "" {
+		log.Printf("STORAGE_URL or DOMAIN not set, skipping sync loop")
+		return
+	}
+
+	pushBody, _ := json.Marshal(map[string]string{"host": s.domain})
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -106,7 +170,7 @@ func (s *Server) syncLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			resp, err := http.Post(s.storageURL+"/push", "application/json", bytes.NewReader([]byte("{}")))
+			resp, err := http.Post(s.storageURL+"/push", "application/json", bytes.NewReader(pushBody))
 			if err != nil {
 				log.Printf("sync: push failed: %v", err)
 				continue
@@ -114,48 +178,5 @@ func (s *Server) syncLoop(ctx context.Context) {
 			resp.Body.Close()
 			log.Printf("sync: push returned %d", resp.StatusCode)
 		}
-	}
-}
-
-func main() {
-	srv := &Server{
-		storageURL: os.Getenv("STORAGE_URL"),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go srv.syncLoop(ctx)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", srv.handleHealth)
-	mux.HandleFunc("/receive", srv.handleReceive)
-	mux.HandleFunc("/inventory", srv.handleInventory)
-
-	httpSrv := &http.Server{
-		Addr:              ":8089",
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 16,
-	}
-
-	go func() {
-		log.Printf("secret-consumer listening on :8089")
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
-		}
-	}()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	log.Printf("shutdown signal received")
-
-	cancel()
-	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer sCancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown error: %v", err)
 	}
 }
