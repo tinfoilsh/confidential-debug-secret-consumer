@@ -8,9 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -71,24 +69,8 @@ func main() {
 		MaxHeaderBytes:    1 << 16,
 	}
 
-	go func() {
-		log.Printf("secret-consumer listening on :8089")
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
-		}
-	}()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	log.Printf("shutdown signal received")
-
-	cancel()
-	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer sCancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown error: %v", err)
-	}
+	log.Printf("secret-consumer listening on :8089")
+	log.Fatal(httpSrv.ListenAndServe())
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
