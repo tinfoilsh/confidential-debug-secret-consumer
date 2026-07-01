@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,7 +29,29 @@ type pgStore struct {
 	pool *pgxpool.Pool
 }
 
-func NewStore(ctx context.Context, databaseURL string) (Store, error) {
+func NewStoreFromEnv(ctx context.Context) (Store, error) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		host := os.Getenv("DATABASE_HOST")
+		if host == "" {
+			return nil, fmt.Errorf("DATABASE_HOST or DATABASE_URL is required")
+		}
+		db := os.Getenv("DATABASE_DB")
+		if db == "" {
+			return nil, fmt.Errorf("DATABASE_DB is required")
+		}
+		user := os.Getenv("DATABASE_USER")
+		if user == "" {
+			return nil, fmt.Errorf("DATABASE_USER is required")
+		}
+		password := os.Getenv("DATABASE_PASSWORD")
+		if password == "" {
+			return nil, fmt.Errorf("DATABASE_PASSWORD is required")
+		}
+		databaseURL = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=require", user, password, host, db)
+	}
+	log.Printf("connecting to db")
+
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to db: %w", err)
