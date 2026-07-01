@@ -50,4 +50,4 @@ shim:
     - /health
     - /receive
     - /inventory
-    - /train
+    - /consume

@@ -11,10 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Metadata is a read-only view of the shared public metadata table.
+// InventoryDB is a read-only view of the shared inventory database.
 // The storage enclave writes items; the consumer reads them.
 // Private data (plaintext) lives in S3 via the buckets sidecar — never in this database.
-type Metadata interface {
+type InventoryDB interface {
 	AllItems(ctx context.Context) ([]item, error)
 	Close() error
 }
@@ -26,11 +26,11 @@ type item struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
-type pgMetadata struct {
+type pgInventory struct {
 	pool *pgxpool.Pool
 }
 
-func NewMetadataFromEnv(ctx context.Context) (Metadata, error) {
+func NewInventoryDBFromEnv(ctx context.Context) (InventoryDB, error) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		host := os.Getenv("DATABASE_HOST")
@@ -62,10 +62,10 @@ func NewMetadataFromEnv(ctx context.Context) (Metadata, error) {
 		pool.Close()
 		return nil, fmt.Errorf("secret_storage_items table not accessible: %w", err)
 	}
-	return &pgMetadata{pool: pool}, nil
+	return &pgInventory{pool: pool}, nil
 }
 
-func (s *pgMetadata) AllItems(ctx context.Context) ([]item, error) {
+func (s *pgInventory) AllItems(ctx context.Context) ([]item, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, user_id, metadata, created_at FROM secret_storage_items ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -86,7 +86,7 @@ func (s *pgMetadata) AllItems(ctx context.Context) ([]item, error) {
 	return items, rows.Err()
 }
 
-func (s *pgMetadata) Close() error {
+func (s *pgInventory) Close() error {
 	s.pool.Close()
 	return nil
 }

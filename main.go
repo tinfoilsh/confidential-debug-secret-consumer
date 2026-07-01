@@ -21,7 +21,7 @@ type keyBundle struct {
 
 type Server struct {
 	buckets    *Client
-	meta       Metadata           // public metadata (shared Postgres, read-only); private data is in S3 via buckets
+	inventory  InventoryDB        // public inventory DB (shared Postgres, read-only); private data is in S3 via buckets
 	mu         sync.RWMutex
 	keys       map[string][]byte // itemID -> encryption key (ephemeral, in-memory only)
 	storageURL string
@@ -39,15 +39,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	meta, err := NewMetadataFromEnv(ctx)
+	inventory, err := NewInventoryDBFromEnv(ctx)
 	if err != nil {
 		log.Fatalf("opening db: %v", err)
 	}
-	defer meta.Close()
+	defer inventory.Close()
 
 	srv := &Server{
 		buckets:    NewBucketsClient(bucketsURL, "secret-storage"),
-		meta:       meta,
+		inventory:  inventory,
 		keys:       make(map[string][]byte),
 		storageURL: storageURL,
 		domain:     domain,
@@ -59,7 +59,7 @@ func main() {
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/receive", srv.handleReceive)
 	mux.HandleFunc("/inventory", srv.handleInventory)
-	mux.HandleFunc("/train", srv.handleTrain)
+	mux.HandleFunc("/consume", srv.handleConsume)
 
 	httpSrv := &http.Server{
 		Addr:              ":8089",
@@ -102,7 +102,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // /receive accepts key bundles from the storage enclave over attested TLS.
-// Keys are stored in memory only - metadata is already in the shared DB.
+// Keys are stored in memory only - item metadata is already in the shared inventory DB.
 func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -145,7 +145,7 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := s.meta.AllItems(r.Context())
+	items, err := s.inventory.AllItems(r.Context())
 	if err != nil {
 		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -161,13 +161,13 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries})
 }
 
-func (s *Server) handleTrain(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	items, err := s.meta.AllItems(r.Context())
+	items, err := s.inventory.AllItems(r.Context())
 	if err != nil {
 		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -187,24 +187,24 @@ func (s *Server) handleTrain(w http.ResponseWriter, r *http.Request) {
 		encKey, ok := s.keys[it.ID]
 		s.mu.RUnlock()
 		if !ok {
-			log.Printf("/train: no key for %s, skipping", it.ID)
+			log.Printf("/consume: no key for %s, skipping", it.ID)
 			continue
 		}
 
 		plaintext, err := s.buckets.Get(ctx, it.ID, encKey)
 		if err != nil {
-			log.Printf("/train: retrieving %s: %v", it.ID, err)
+			log.Printf("/consume: retrieving %s: %v", it.ID, err)
 			continue
 		}
 		totalBytes += len(plaintext)
 		datasets = append(datasets, dataset{ID: it.ID, Size: len(plaintext), Meta: it.Metadata})
 	}
 
-	log.Printf("/train: processed %d datasets (%d bytes total)", len(datasets), totalBytes)
+	log.Printf("/consume: processed %d datasets (%d bytes total)", len(datasets), totalBytes)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":      "trained",
+		"status":      "consumed",
 		"datasets":    len(datasets),
 		"total_bytes": totalBytes,
 		"items":       datasets,
