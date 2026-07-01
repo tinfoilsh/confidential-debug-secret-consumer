@@ -61,6 +61,7 @@ func main() {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
 		log.Printf("/health: encoding response: %v", err)
 	}
@@ -90,6 +91,7 @@ func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("/receive: stored %d/%d key bundles", stored, len(bundles))
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"received": stored})
 }
 
@@ -110,6 +112,7 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 		entries[i].Meta = it.Metadata
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{"count": len(entries), "items": entries}); err != nil {
 		log.Printf("/inventory: encoding response: %v", err)
 	}
@@ -151,6 +154,7 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("/consume: processed %d datasets (%d bytes total)", len(datasets), totalBytes)
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":      "consumed",
 		"datasets":    len(datasets),
