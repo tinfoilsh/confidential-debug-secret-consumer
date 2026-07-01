@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,9 +16,8 @@ import (
 )
 
 type keyBundle struct {
-	ID       string          `json:"id"`
-	Key      string          `json:"key"`
-	Metadata json.RawMessage `json:"metadata"`
+	ID  string `json:"id"`
+	Key string `json:"key"`
 }
 
 type Server struct {
@@ -26,22 +26,36 @@ type Server struct {
 	mu         sync.RWMutex
 	keys       map[string][]byte // itemID -> encryption key (ephemeral, in-memory only)
 	storageURL string
-	selfHost   string
-	selfRepo   string
+	domain     string
 }
 
 func main() {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		log.Fatal("DATABASE_URL is required")
+		dbHost := os.Getenv("DATABASE_HOST")
+		if dbHost == "" {
+			log.Fatal("DATABASE_HOST or DATABASE_URL is required")
+		}
+		dbName := os.Getenv("DATABASE_DB")
+		if dbName == "" {
+			log.Fatal("DATABASE_DB is required")
+		}
+		dbUser := os.Getenv("DATABASE_USER")
+		if dbUser == "" {
+			log.Fatal("DATABASE_USER is required")
+		}
+		dbPassword := os.Getenv("DATABASE_PASSWORD")
+		if dbPassword == "" {
+			log.Fatal("DATABASE_PASSWORD is required")
+		}
+		databaseURL = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=require", dbUser, dbPassword, dbHost, dbName)
 	}
 	bucketsURL := os.Getenv("BUCKETS_URL")
 	if bucketsURL == "" {
 		log.Fatal("BUCKETS_URL is required")
 	}
 	storageURL := os.Getenv("STORAGE_URL")
-	selfHost := os.Getenv("SELF_HOST")
-	selfRepo := os.Getenv("SELF_REPO")
+	domain := os.Getenv("DOMAIN")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -57,8 +71,7 @@ func main() {
 		store:      store,
 		keys:       make(map[string][]byte),
 		storageURL: storageURL,
-		selfHost:   selfHost,
-		selfRepo:   selfRepo,
+		domain:     domain,
 	}
 
 	go srv.syncLoop(ctx)
@@ -109,6 +122,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// /receive accepts key bundles from the storage enclave over attested TLS.
+// Keys are stored in memory only - metadata is already in the shared DB.
 func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -121,33 +136,23 @@ func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored := s.processBundles(r.Context(), bundles)
-	log.Printf("/receive: stored %d/%d key bundles", stored, len(bundles))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]int{"received": stored})
-}
-
-func (s *Server) processBundles(ctx context.Context, bundles []keyBundle) int {
 	stored := 0
 	for _, b := range bundles {
 		encKey, err := base64.StdEncoding.DecodeString(b.Key)
 		if err != nil {
-			log.Printf("invalid key for %s: %v", b.ID, err)
+			log.Printf("/receive: invalid key for %s: %v", b.ID, err)
 			continue
 		}
-
 		s.mu.Lock()
 		s.keys[b.ID] = encKey
 		s.mu.Unlock()
-
-		if err := s.store.PutItem(ctx, b.ID, b.Metadata); err != nil {
-			log.Printf("storing %s in db: %v", b.ID, err)
-			continue
-		}
 		stored++
 	}
-	return stored
+
+	log.Printf("/receive: stored %d/%d key bundles", stored, len(bundles))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]int{"received": stored})
 }
 
 type inventoryEntry struct {
@@ -232,14 +237,13 @@ func (s *Server) syncLoop(ctx context.Context) {
 		log.Printf("STORAGE_URL not set, skipping sync loop")
 		return
 	}
-	if s.selfHost == "" || s.selfRepo == "" {
-		log.Printf("SELF_HOST or SELF_REPO not set, skipping sync loop")
+	if s.domain == "" {
+		log.Printf("DOMAIN not set, skipping sync loop")
 		return
 	}
 
 	pushBody, _ := json.Marshal(map[string]string{
-		"host": s.selfHost,
-		"repo": s.selfRepo,
+		"host": s.domain,
 	})
 
 	ticker := time.NewTicker(60 * time.Second)
