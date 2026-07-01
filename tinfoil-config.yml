@@ -12,7 +12,7 @@ networks:
 
 containers:
   - name: "secret-consumer"
-    image: "ghcr.io/tinfoilsh/confidential-debug-secret-consumer@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    image: "ghcr.io/tinfoilsh/confidential-debug-secret-consumer@sha256:1eb7856bae1ba931d524d813002aaede87008533f4683b276ff74478c3a81349" # v0.0.2
     restart: always
     networks: [egress]
     env:
